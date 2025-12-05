@@ -113,6 +113,9 @@ public class ShardSearchRequest extends TransportRequest implements IndicesReque
     private final ShardSearchContextId readerId;
     private final TimeValue keepAlive;
 
+    private BytesReference cachedSerializedSource;
+    private Version cachedSerializedSourceVersion;
+
     public ShardSearchRequest(
         OriginalIndices originalIndices,
         SearchRequest searchRequest,
@@ -290,6 +293,8 @@ public class ShardSearchRequest extends TransportRequest implements IndicesReque
         this.originalIndices = clone.originalIndices;
         this.readerId = clone.readerId;
         this.keepAlive = clone.keepAlive;
+        this.cachedSerializedSource = clone.cachedSerializedSource;
+        this.cachedSerializedSourceVersion = clone.cachedSerializedSourceVersion;
     }
 
     @Override
@@ -306,7 +311,21 @@ public class ShardSearchRequest extends TransportRequest implements IndicesReque
             out.writeVInt(numberOfShards);
         }
         out.writeOptionalWriteable(scroll);
-        out.writeOptionalWriteable(source);
+        // Only use cached bytes when:
+        // - we are not writing as a cache key (asKey == false)
+        // - we have cached bytes
+        // - a source exists
+        // - the cached version matches the current StreamOutput version
+        if (!asKey
+            && cachedSerializedSource != null
+            && source != null
+            && cachedSerializedSourceVersion != null
+            && out.getVersion().equals(cachedSerializedSourceVersion)) {
+            out.writeBoolean(true);
+            cachedSerializedSource.writeTo(out);
+        } else {
+            out.writeOptionalWriteable(source);
+        }
         if (out.getVersion().before(Version.V_2_0_0)) {
             // types not supported so send an empty array to previous versions
             out.writeStringArray(Strings.EMPTY_ARRAY);
@@ -367,10 +386,12 @@ public class ShardSearchRequest extends TransportRequest implements IndicesReque
 
     public void setAliasFilter(AliasFilter aliasFilter) {
         this.aliasFilter = aliasFilter;
+        this.cachedSerializedSource = null;
     }
 
     public void source(SearchSourceBuilder source) {
         this.source = source;
+        this.cachedSerializedSource = null;
     }
 
     public int numberOfShards() {
@@ -506,6 +527,14 @@ public class ShardSearchRequest extends TransportRequest implements IndicesReque
             sb.append("source[]");
         }
         return sb.toString();
+    }
+
+    /**
+     * Sets the cached serialized source to optimize serialization when fanning out to many shards.
+     */
+    public void setCachedSerializedSource(BytesReference cachedSerializedSource, Version version) {
+        this.cachedSerializedSource = cachedSerializedSource;
+        this.cachedSerializedSourceVersion = version;
     }
 
     public Rewriteable<Rewriteable> getRewriteable() {
